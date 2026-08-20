@@ -30,6 +30,7 @@ if ($proc.ExitCode -ne 0) { throw "Suno --stage-components failed with exit code
 Copy-Item -Recurse -Force (Join-Path $SunoRoot 'app') (Join-Path $OutputDir 'app')
 Copy-Item -Recurse -Force (Join-Path $SunoRoot 'plugins') (Join-Path $OutputDir 'plugins')
 Copy-Item -Force (Join-Path $SunoRoot 'requirements-core.txt') (Join-Path $OutputDir 'requirements-core.txt')
+Copy-Item -Force (Join-Path $SunoRoot 'requirements-ai.txt') (Join-Path $OutputDir 'requirements-ai.txt')
 Get-ChildItem -Recurse -Directory -Filter '__pycache__' (Join-Path $OutputDir 'app'), (Join-Path $OutputDir 'plugins') -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
 
 # Unified copy must not auto-update itself from the standalone Suno release branch.
@@ -73,6 +74,30 @@ Remove-Item $getPip -Force
 & $py -m pip install --no-warn-script-location -r (Join-Path $SunoRoot 'requirements-core.txt')
 if ($LASTEXITCODE -ne 0) { throw 'pip install into embedded Suno Python failed' }
 
+# IMPORTANT: original Suno advanced_features.py intentionally loads the two optional AI
+# components from plugins/<component>_env via PYTHONPATH. For a truly complete unified
+# offline build, preinstall both exact pinned dependency sets into those exact folders.
+$transcriptionEnv = Join-Path $OutputDir 'plugins\transcription_env'
+$stemsEnv = Join-Path $OutputDir 'plugins\stems_env'
+New-Item -ItemType Directory -Force -Path $transcriptionEnv, $stemsEnv | Out-Null
+
+Write-Host 'Installing Suno transcription AI (faster-whisper + ctranslate2) into plugins\transcription_env ...' -ForegroundColor Cyan
+& $py -m pip install --no-warn-script-location --disable-pip-version-check --target $transcriptionEnv 'faster-whisper==1.2.1' 'ctranslate2==4.8.1'
+if ($LASTEXITCODE -ne 0) { throw 'Suno transcription AI dependencies failed to install.' }
+
+Write-Host 'Installing Suno stem-separation AI into plugins\stems_env ...' -ForegroundColor Cyan
+& $py -m pip install --no-warn-script-location --disable-pip-version-check --target $stemsEnv 'audio-separator[cpu]==0.44.5'
+if ($LASTEXITCODE -ne 0) { throw 'Suno stem-separation AI dependencies failed to install.' }
+
+# Verify the packages from the same isolated plugin layout used by the running Suno code.
+$env:PYTHONPATH = $transcriptionEnv
+& $py -c "import faster_whisper, ctranslate2; print('TRANSCRIPTION_AI_OK', faster_whisper.__version__, ctranslate2.__version__)"
+if ($LASTEXITCODE -ne 0) { throw 'Bundled Suno transcription AI import test failed.' }
+$env:PYTHONPATH = $stemsEnv
+& $py -c "import audio_separator; from audio_separator.separator import Separator; print('STEMS_AI_OK')"
+if ($LASTEXITCODE -ne 0) { throw 'Bundled Suno stem-separation AI import test failed.' }
+Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+
 # Real health check using the SAME pythonw + server.py path that the unified app will use.
 $healthRoot = Join-Path $env:RUNNER_TEMP 'np-suno-unified-health'
 if (Test-Path $healthRoot) { Remove-Item $healthRoot -Recurse -Force }
@@ -105,4 +130,4 @@ try {
     if (-not $p.HasExited) { $p.Kill() }
 }
 
-Write-Host "SunoEngine staged and health-tested successfully: $OutputDir"
+Write-Host "SunoEngine staged, core health-tested, and both AI plugin environments verified successfully: $OutputDir"
