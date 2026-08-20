@@ -52,13 +52,21 @@ if ($matches.Count -ne 1) { throw "Expected exactly one Suno update-thread block
 $serverText = [regex]::Replace($serverText, $pattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $replacement }, 1)
 Set-Content -Path $serverCore -Value $serverText -Encoding UTF8 -NoNewline
 
-# Reuse the real FFmpeg/ffprobe installed for the NP build and mirror Suno's expected tools layout.
+# Reuse real Windows media/fingerprint tools and mirror the exact paths Suno expects.
 $ffmpeg = (Get-Command ffmpeg.exe -ErrorAction Stop).Source
 $ffprobe = (Get-Command ffprobe.exe -ErrorAction Stop).Source
 $ffDir = Join-Path $OutputDir 'tools\ffmpeg\bin'
 New-Item -ItemType Directory -Force -Path $ffDir | Out-Null
 Copy-Item -Force $ffmpeg (Join-Path $ffDir 'ffmpeg.exe')
 Copy-Item -Force $ffprobe (Join-Path $ffDir 'ffprobe.exe')
+
+# plugin_status(ROOT) expects Chromaprint's fpcalc at plugins/chromaprint/fpcalc.exe.
+$fpcalc = (Get-Command fpcalc.exe -ErrorAction Stop).Source
+$chromaprintDir = Join-Path $OutputDir 'plugins\chromaprint'
+New-Item -ItemType Directory -Force -Path $chromaprintDir | Out-Null
+Copy-Item -Force $fpcalc (Join-Path $chromaprintDir 'fpcalc.exe')
+& (Join-Path $chromaprintDir 'fpcalc.exe') -version
+if ($LASTEXITCODE -ne 0) { throw 'Bundled Suno fpcalc failed its real version test.' }
 
 # Install the exact core Python dependency list into Suno's staged embeddable interpreter.
 $py = Join-Path $OutputDir 'python\python.exe'
@@ -74,9 +82,8 @@ Remove-Item $getPip -Force
 & $py -m pip install --no-warn-script-location -r (Join-Path $SunoRoot 'requirements-core.txt')
 if ($LASTEXITCODE -ne 0) { throw 'pip install into embedded Suno Python failed' }
 
-# IMPORTANT: original Suno advanced_features.py intentionally loads the two optional AI
-# components from plugins/<component>_env via PYTHONPATH. For a truly complete unified
-# offline build, preinstall both exact pinned dependency sets into those exact folders.
+# Original Suno advanced_features.py loads these from plugins/<component>_env via PYTHONPATH.
+# Preinstall them there so transcription and stem separation are ready immediately after install.
 $transcriptionEnv = Join-Path $OutputDir 'plugins\transcription_env'
 $stemsEnv = Join-Path $OutputDir 'plugins\stems_env'
 New-Item -ItemType Directory -Force -Path $transcriptionEnv, $stemsEnv | Out-Null
@@ -98,7 +105,7 @@ $env:PYTHONPATH = $stemsEnv
 if ($LASTEXITCODE -ne 0) { throw 'Bundled Suno stem-separation AI import test failed.' }
 Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
 
-# Real health check using the SAME pythonw + server.py path that the unified app will use.
+# Real health and advanced-feature checks using the SAME pythonw + server.py path the unified app uses.
 $healthRoot = Join-Path $env:RUNNER_TEMP 'np-suno-unified-health'
 if (Test-Path $healthRoot) { Remove-Item $healthRoot -Recurse -Force }
 $env:SUNO_STUDIO_USER_DIR = $healthRoot
@@ -124,10 +131,28 @@ try {
         } catch {}
     }
     if (-not $ok) { throw 'Staged Suno server did not become healthy.' }
+
+    $advanced = Invoke-RestMethod -Uri 'http://127.0.0.1:18766/api/advanced/status' -TimeoutSec 10
+    foreach ($component in @('stems','transcription','chromaprint')) {
+        $state = $advanced.plugins.$component
+        if ($null -eq $state -or -not $state.installed) {
+            throw "Staged Suno advanced component is not installed: $component"
+        }
+    }
+    Write-Host 'Suno advanced status confirms stems + transcription + Chromaprint are installed.' -ForegroundColor Green
+
+    $v3 = Invoke-RestMethod -Uri 'http://127.0.0.1:18766/api/v3/status' -TimeoutSec 15
+    if (-not $v3.preflight.ok) {
+        throw "Suno v3 required-tool preflight is blocked: $($v3.preflight | ConvertTo-Json -Depth 8 -Compress)"
+    }
+    Write-Host "Suno v3 required-tool preflight: $($v3.preflight.readiness)" -ForegroundColor Green
+
+    # Panako is intentionally NOT silently bundled: upstream is AGPL and states native Windows is unsupported.
+    # The original Suno panako_install_test.py verifies the user-supplied JAR integration path in CI.
     Invoke-RestMethod -Uri 'http://127.0.0.1:18766/api/shutdown' -Method Post -Body '{}' -ContentType 'application/json' -TimeoutSec 5 | Out-Null
 } finally {
     Start-Sleep -Milliseconds 500
     if (-not $p.HasExited) { $p.Kill() }
 }
 
-Write-Host "SunoEngine staged, core health-tested, and both AI plugin environments verified successfully: $OutputDir"
+Write-Host "SunoEngine staged, core + advanced runtime-tested, and AI/fingerprint components verified successfully: $OutputDir"
