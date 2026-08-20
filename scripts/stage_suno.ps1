@@ -107,13 +107,16 @@ $stemsEnv = Join-Path $OutputDir 'plugins\stems_env'
 New-Item -ItemType Directory -Force -Path $transcriptionEnv, $stemsEnv | Out-Null
 & $py -m pip install --no-warn-script-location --disable-pip-version-check --target $transcriptionEnv 'faster-whisper==1.2.1' 'ctranslate2==4.8.1'
 if ($LASTEXITCODE -ne 0) { throw 'Suno transcription AI dependencies failed to install.' }
-& $py -m pip install --no-warn-script-location --disable-pip-version-check --target $stemsEnv 'audio-separator[cpu]==0.44.5'
+# audio-separator 0.44.5 reaches audioread at runtime through its UVR/librosa path,
+# but the resolved dependency set on Python 3.13 does not install audioread automatically.
+# Pin it explicitly so Separator can really import on a clean Windows install.
+& $py -m pip install --no-warn-script-location --disable-pip-version-check --target $stemsEnv 'audio-separator[cpu]==0.44.5' 'audioread==3.0.1'
 if ($LASTEXITCODE -ne 0) { throw 'Suno stem-separation AI dependencies failed to install.' }
 
 # Explicit sys.path mirrors the worker patch and works under CPython ._pth isolation.
 & $py -c "import sys; sys.path.insert(0, sys.argv[1]); import faster_whisper, ctranslate2; print('TRANSCRIPTION_AI_OK')" $transcriptionEnv
 if ($LASTEXITCODE -ne 0) { throw 'Bundled Suno transcription AI import test failed.' }
-& $py -c "import sys; sys.path.insert(0, sys.argv[1]); import audio_separator; from audio_separator.separator import Separator; print('STEMS_AI_OK')" $stemsEnv
+& $py -c "import sys; sys.path.insert(0, sys.argv[1]); import audioread, audio_separator; from audio_separator.separator import Separator; print('STEMS_AI_OK')" $stemsEnv
 if ($LASTEXITCODE -ne 0) { throw 'Bundled Suno stem-separation AI import test failed.' }
 
 # Prove the actual staged worker files see their own env without PYTHONPATH.
@@ -122,7 +125,7 @@ import runpy, sys
 from pathlib import Path
 for name, env, mods in [
     ('transcribe_worker.py','transcription_env',('faster_whisper','ctranslate2')),
-    ('stems_worker.py','stems_env',('audio_separator',)),
+    ('stems_worker.py','stems_env',('audioread','audio_separator')),
 ]:
     worker = Path(sys.argv[1]) / 'plugins' / name
     text = worker.read_text(encoding='utf-8-sig')
