@@ -150,6 +150,16 @@ text = text.replace('#define MyAppName "NP Video Studio"', '#define MyAppName "N
 text = text.replace('#define MyAppPublisher "NP Video Studio"', '#define MyAppPublisher "NP + Suno Unified Studio"')
 text = text.replace('AppId={{7F3A9C41-2E5D-4B18-9A6C-D0E4F1B85C27}}', 'AppId={{A0C88060-C275-4677-9983-E0E76DFFCCF6}}')
 text = text.replace('OutputBaseFilename=NPVideoStudio-Setup-{#MyAppVersion}', 'OutputBaseFilename=NPSunoUnifiedStudio-Setup-{#MyAppVersion}')
+# The unified payload now includes the full CPU PyTorch/ONNX AI stack and a WebView2 offline installer.
+# Inno's LZMA2 solid stream can exhaust the address space of the 32-bit Inno 6 compiler on this payload.
+# ZIP/9 is intentionally chosen here because Inno documents sub-1-MB compressor/decompressor memory use,
+# and disabling solid compression keeps files independently accessible. No application file is removed.
+text = replace_once(
+    text,
+    'Compression=lzma2\nSolidCompression=yes\n',
+    'Compression=zip/9\nSolidCompression=no\n',
+    rel + " low-memory compression",
+)
 text = text.replace('Poveži .npvsproject fajlove sa NP Video Studio"; GroupDescription: "Registracija fajlova:"', 'Poveži .npvsproject fajlove sa NP + Suno Unified Studio"; GroupDescription: "Registracija fajlova:"; Flags: unchecked')
 text = text.replace('NPVideoStudioProject', 'NPSunoUnifiedStudioProject')
 text = text.replace('ValueData: "NP Video Studio projekat"', 'ValueData: "NP + Suno Unified Studio projekat"')
