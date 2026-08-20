@@ -36,6 +36,8 @@ for src in overlay.rglob("*"):
         dst.write_bytes(src.read_bytes())
 
 # 1) Avalonia WebView dependency. Keep the original NP Avalonia packages unchanged.
+# 11.4.0 is the first official FOSS/MIT WebView release and supports Avalonia >= 11.1.0,
+# so the pinned NP Avalonia 11.1.3 packages do not need to be upgraded.
 rel = "src/NPVideoStudio.App/NPVideoStudio.App.csproj"
 text = read(rel)
 needle = '    <PackageReference Include="Avalonia.Desktop" Version="11.1.3" />\n'
@@ -43,7 +45,7 @@ if 'Avalonia.Controls.WebView' not in text:
     text = replace_once(
         text,
         needle,
-        needle + '    <PackageReference Include="Avalonia.Controls.WebView" Version="11.3.16" />\n',
+        needle + '    <PackageReference Include="Avalonia.Controls.WebView" Version="11.4.0" />\n',
         rel,
     )
 write(rel, text)
