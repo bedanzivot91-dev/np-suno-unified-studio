@@ -11,27 +11,57 @@ if ($null -eq $installer) {
     throw "Unified installer was not found in $dist"
 }
 
+function Wait-ProcessOrFail {
+    param(
+        [Parameter(Mandatory = $true)] [System.Diagnostics.Process]$Process,
+        [Parameter(Mandatory = $true)] [int]$TimeoutSeconds,
+        [Parameter(Mandatory = $true)] [string]$Label,
+        [string]$LogFile = ''
+    )
+
+    if (-not $Process.WaitForExit($TimeoutSeconds * 1000)) {
+        try { Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue } catch {}
+        if ($LogFile -and (Test-Path $LogFile)) {
+            Write-Host "--- $Label log tail ---"
+            Get-Content $LogFile -Tail 250
+        }
+        throw "$Label timed out after $TimeoutSeconds seconds."
+    }
+    if ($Process.ExitCode -ne 0) {
+        if ($LogFile -and (Test-Path $LogFile)) {
+            Write-Host "--- $Label log tail ---"
+            Get-Content $LogFile -Tail 250
+        }
+        throw "$Label failed with exit code $($Process.ExitCode)."
+    }
+}
+
 $installDir = Join-Path $env:RUNNER_TEMP 'np-suno-unified-installed'
 $userDir = Join-Path $env:RUNNER_TEMP 'np-suno-unified-smoke-user'
+$installerLog = Join-Path $env:RUNNER_TEMP 'np-suno-unified-install.log'
+$uninstallerLog = Join-Path $env:RUNNER_TEMP 'np-suno-unified-uninstall.log'
 if (Test-Path $installDir) { Remove-Item $installDir -Recurse -Force }
 if (Test-Path $userDir) { Remove-Item $userDir -Recurse -Force }
+Remove-Item $installerLog, $uninstallerLog -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $userDir | Out-Null
 
-Write-Host "Smoke-installing: $($installer.FullName)" -ForegroundColor Cyan
-Write-Host "Target: $installDir" -ForegroundColor Cyan
+Write-Host '[1/5] Running the real Inno Setup installer...' -ForegroundColor Cyan
+Write-Host "Installer: $($installer.FullName)"
+Write-Host "Target:    $installDir"
 $installArgs = @(
     '/VERYSILENT',
     '/SUPPRESSMSGBOXES',
     '/NORESTART',
     '/SP-',
     "/DIR=$installDir",
+    "/LOG=$installerLog",
     '/MERGETASKS=!desktopicon,!associate,!resetstate'
 )
-$installProcess = Start-Process -FilePath $installer.FullName -ArgumentList $installArgs -Wait -PassThru
-if ($installProcess.ExitCode -ne 0) {
-    throw "Unified installer failed in silent mode with exit code $($installProcess.ExitCode)."
-}
+$installProcess = Start-Process -FilePath $installer.FullName -ArgumentList $installArgs -PassThru
+Wait-ProcessOrFail -Process $installProcess -TimeoutSeconds 300 -Label 'Unified installer' -LogFile $installerLog
+Write-Host '[1/5] Installer completed successfully.' -ForegroundColor Green
 
+Write-Host '[2/5] Verifying the installed payload...' -ForegroundColor Cyan
 $required = @(
     'NPVideoStudio.exe',
     'SunoEngine\python\pythonw.exe',
@@ -54,9 +84,9 @@ foreach ($rel in $required) {
         throw "Installed unified file is empty: $rel"
     }
 }
-Write-Host 'Installer smoke test: required NP + Suno files are installed.' -ForegroundColor Green
+Write-Host '[2/5] Required NP + Suno files are physically installed.' -ForegroundColor Green
 
-# Verify the Suno backend from the INSTALLED location, not from the build staging directory.
+Write-Host '[3/5] Starting the Suno backend from the INSTALLED directory...' -ForegroundColor Cyan
 $engineRoot = Join-Path $installDir 'SunoEngine'
 $pythonw = Join-Path $engineRoot 'python\pythonw.exe'
 $server = Join-Path $engineRoot 'app\server.py'
@@ -78,6 +108,7 @@ $sunoProcess = Start-Process -FilePath $pythonw -ArgumentList $server -WorkingDi
 try {
     $healthy = $false
     for ($i = 0; $i -lt 60; $i++) {
+        $sunoProcess.Refresh()
         if ($sunoProcess.HasExited) {
             throw "Installed Suno backend exited early with code $($sunoProcess.ExitCode)."
         }
@@ -94,7 +125,7 @@ try {
     if (-not $healthy) {
         throw 'Installed Suno backend did not become healthy.'
     }
-    Write-Host 'Installed Suno backend health check passed.' -ForegroundColor Green
+    Write-Host '[3/5] Installed Suno backend health check passed.' -ForegroundColor Green
 
     try {
         Invoke-WebRequest -Uri "http://127.0.0.1:$healthPort/api/shutdown" -Method Post -ContentType 'application/json' -Body '{}' -UseBasicParsing -TimeoutSec 3 | Out-Null
@@ -109,7 +140,7 @@ try {
     }
 }
 
-# Start the actually installed GUI and verify that Windows created a responsive top-level window.
+Write-Host '[4/5] Starting the INSTALLED GUI and checking Windows responsiveness...' -ForegroundColor Cyan
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -158,7 +189,7 @@ try {
     }
 
     if ($windowHandle -eq [IntPtr]::Zero) {
-        throw 'Installed GUI did not create a top-level window.'
+        throw 'Installed GUI did not create a top-level window within 30 seconds.'
     }
 
     $result = [IntPtr]::Zero
@@ -174,23 +205,23 @@ try {
     if ($sendResult -eq [IntPtr]::Zero) {
         throw 'Installed GUI main window is not responding to Windows messages.'
     }
-    Write-Host 'Installed GUI created a responsive Windows window.' -ForegroundColor Green
+    Write-Host '[4/5] Installed GUI created a responsive Windows window.' -ForegroundColor Green
 } finally {
     if (-not $appProcess.HasExited) {
         $null = $appProcess.CloseMainWindow()
-        if (-not $appProcess.WaitForExit(5000)) {
+        if (-not $appProcess.WaitForExit(10000)) {
             Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
         }
     }
 }
 
-# Verify that the installed application can also be removed cleanly in unattended mode.
+Write-Host '[5/5] Running the real uninstaller...' -ForegroundColor Cyan
 $uninstaller = Get-ChildItem -Path $installDir -Filter 'unins*.exe' -File | Select-Object -First 1
 if ($null -eq $uninstaller) {
     throw 'Installer did not create an uninstaller.'
 }
-$uninstallProcess = Start-Process -FilePath $uninstaller.FullName -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART') -Wait -PassThru
-if ($uninstallProcess.ExitCode -ne 0) {
-    throw "Unified uninstaller failed with exit code $($uninstallProcess.ExitCode)."
-}
-Write-Host 'INSTALL + INSTALLED SUNO + RESPONSIVE GUI + UNINSTALL smoke test PASSED.' -ForegroundColor Green
+$uninstallArgs = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/LOG=$uninstallerLog")
+$uninstallProcess = Start-Process -FilePath $uninstaller.FullName -ArgumentList $uninstallArgs -PassThru
+Wait-ProcessOrFail -Process $uninstallProcess -TimeoutSeconds 120 -Label 'Unified uninstaller' -LogFile $uninstallerLog
+Write-Host '[5/5] Uninstaller completed successfully.' -ForegroundColor Green
+Write-Host 'INSTALL + INSTALLED PAYLOAD + INSTALLED SUNO + RESPONSIVE GUI + UNINSTALL smoke test PASSED.' -ForegroundColor Green
