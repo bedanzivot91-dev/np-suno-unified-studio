@@ -13,7 +13,7 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 120
+    timeout-minutes: 240
 
     steps:
       - name: Checkout unified repository
@@ -85,6 +85,44 @@ jobs:
         shell: pwsh
         run: pwsh -File scripts/stage_suno.ps1 -SunoRoot _sources/suno -OutputDir _stage/SunoEngine
 
+      - name: Run complete pinned Suno regression suite (33 tests + import smoke)
+        shell: pwsh
+        working-directory: _sources/suno
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-core.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Installing Suno test dependencies failed.' }
+
+          # The tests must use the exact full FFmpeg/Chromaprint, Deno and yt-dlp staged for the unified release.
+          $stage = Join-Path $env:GITHUB_WORKSPACE '_stage\SunoEngine'
+          New-Item -ItemType Directory -Force -Path 'tools\ffmpeg\bin','tools\deno','tools\yt-dlp' | Out-Null
+          Copy-Item -Force (Join-Path $stage 'tools\ffmpeg\bin\ffmpeg.exe') 'tools\ffmpeg\bin\ffmpeg.exe'
+          Copy-Item -Force (Join-Path $stage 'tools\ffmpeg\bin\ffprobe.exe') 'tools\ffmpeg\bin\ffprobe.exe'
+          if (Test-Path (Join-Path $stage 'tools\deno\deno.exe')) { Copy-Item -Force (Join-Path $stage 'tools\deno\deno.exe') 'tools\deno\deno.exe' }
+          if (Test-Path (Join-Path $stage 'tools\yt-dlp\yt-dlp.exe')) { Copy-Item -Force (Join-Path $stage 'tools\yt-dlp\yt-dlp.exe') 'tools\yt-dlp\yt-dlp.exe' }
+
+          python tests/import_smoke_test.py
+          if ($LASTEXITCODE -ne 0) { throw 'Suno import_smoke_test.py failed.' }
+
+          $tests = @(
+            'audio_analysis_test.py','auto_update_test.py','bulk_library_download_test.py','chromaprint_upgrade_test.py',
+            'critical_v300.py','duplicate_audio_confirm_test.py','dynamic_library_scale_test.py','fingerprint_index_test.py',
+            'http_integration_v300.py','installer_logic_test.py','original_plus_test.py','panako_install_test.py',
+            'phase_alignment_test.py','regression_v300.py','release_center_test.py','remote_only_recognition_test.py',
+            'short_clip_match_test.py','short_clip_thresholds_test.py','shorts_teaser_test.py','smart_library_test.py',
+            'song_finder_remote_source_test.py','song_finder_shortlist_test.py','song_finder_test.py','static_cache_headers_test.py',
+            'subtitle_editor_test.py','tempo_extraction_test.py','v3_features_test.py','version_lab_test.py','watchdog_test.py',
+            'youtube_channels_test.py','youtube_pipeline_fix_test.py','youtube_scan_test.py','platform_intelligence_test.py'
+          )
+          $index = 0
+          foreach ($test in $tests) {
+            $index++
+            Write-Host "SUNO TEST $index/$($tests.Count): $test" -ForegroundColor Cyan
+            python (Join-Path 'tests' $test)
+            if ($LASTEXITCODE -ne 0) { throw "Pinned Suno regression test failed: $test" }
+          }
+          Write-Host "All $($tests.Count) pinned Suno regression tests + import smoke PASSED." -ForegroundColor Green
+
       - name: Restore merged NP shell
         working-directory: _sources/np
         run: dotnet restore NPVideoStudio.sln
@@ -108,15 +146,25 @@ jobs:
         shell: pwsh
         run: |
           $portable = '_sources\np\dist\NPSunoUnifiedStudio-Portable-x64'
-          $required = @(
+          $requiredFiles = @(
             "$portable\NPVideoStudio.exe",
             "$portable\SunoEngine\python\pythonw.exe",
             "$portable\SunoEngine\app\server.py",
             "$portable\SunoEngine\app\server_core.py",
-            "$portable\SunoEngine\app\web\index.html"
+            "$portable\SunoEngine\app\web\index.html",
+            "$portable\SunoEngine\plugins\transcribe_worker.py",
+            "$portable\SunoEngine\plugins\stems_worker.py"
           )
-          foreach ($file in $required) {
+          foreach ($file in $requiredFiles) {
             if (-not (Test-Path $file -PathType Leaf)) { throw "Unified payload missing: $file" }
+          }
+          $requiredDirs = @(
+            "$portable\SunoEngine\plugins\transcription_env\faster_whisper",
+            "$portable\SunoEngine\plugins\transcription_env\ctranslate2",
+            "$portable\SunoEngine\plugins\stems_env\audio_separator"
+          )
+          foreach ($dir in $requiredDirs) {
+            if (-not (Test-Path $dir -PathType Container)) { throw "Unified payload missing AI component: $dir" }
           }
           $installer = Get-ChildItem '_sources\np\dist\NPSunoUnifiedStudio-Setup-*.exe' | Select-Object -First 1
           if (-not $installer) { throw 'Unified installer was not produced.' }
