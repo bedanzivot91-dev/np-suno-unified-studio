@@ -35,12 +35,10 @@ Get-ChildItem -Recurse -Directory -Filter '__pycache__' (Join-Path $OutputDir 'a
 # Unified copy must not auto-update itself from the standalone Suno release branch.
 $serverCore = Join-Path $OutputDir 'app\server_core.py'
 $serverText = Get-Content $serverCore -Raw -Encoding UTF8
-$old = @'
-    UPDATE_STOP.clear()
-    UPDATE_THREAD = threading.Thread(target=update_check_loop, daemon=True, name="auto-update-check")
-    UPDATE_THREAD.start()
-'@
-$new = @'
+$pattern = '(?m)^    UPDATE_STOP\.clear\(\)\r?$' + "`n" +
+           '^    UPDATE_THREAD = threading\.Thread\(target=update_check_loop, daemon=True, name="auto-update-check"\)\r?$' + "`n" +
+           '^    UPDATE_THREAD\.start\(\)\r?$'
+$replacement = @'
     UPDATE_STOP.clear()
     if os.environ.get("SUNO_DISABLE_AUTO_UPDATE", "0") != "1":
         UPDATE_THREAD = threading.Thread(target=update_check_loop, daemon=True, name="auto-update-check")
@@ -48,8 +46,9 @@ $new = @'
     else:
         UPDATE_THREAD = None
 '@
-if (-not $serverText.Contains($old)) { throw 'Expected Suno update-thread block was not found; source changed unexpectedly.' }
-$serverText = $serverText.Replace($old, $new)
+$matches = [regex]::Matches($serverText, $pattern)
+if ($matches.Count -ne 1) { throw "Expected exactly one Suno update-thread block, found $($matches.Count)." }
+$serverText = [regex]::Replace($serverText, $pattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $replacement }, 1)
 Set-Content -Path $serverCore -Value $serverText -Encoding UTF8 -NoNewline
 
 # Reuse the real FFmpeg/ffprobe installed for the NP build and mirror Suno's expected tools layout.
