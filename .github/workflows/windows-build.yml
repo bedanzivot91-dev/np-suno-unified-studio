@@ -77,7 +77,9 @@ jobs:
 
       - name: Apply integration only to temporary NP checkout
         shell: pwsh
-        run: python scripts/apply_integration.py _sources/np
+        run: |
+          python scripts/apply_integration.py _sources/np
+          python scripts/apply_runtime_fixes.py _sources/np
 
       - name: Stage and health-test pinned Suno engine
         shell: pwsh
@@ -119,6 +121,10 @@ jobs:
           $installer = Get-ChildItem '_sources\np\dist\NPSunoUnifiedStudio-Setup-*.exe' | Select-Object -First 1
           if (-not $installer) { throw 'Unified installer was not produced.' }
           Write-Host "Unified installer: $($installer.FullName) ($($installer.Length) bytes)"
+
+      - name: Real Windows install + installed runtime + responsive GUI smoke test
+        shell: pwsh
+        run: pwsh -File scripts/smoke_install.ps1 -DistDir _sources/np/dist
 
       - name: Upload unified installer
         uses: actions/upload-artifact@v4
