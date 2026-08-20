@@ -60,7 +60,16 @@ foreach ($patch in $workerPatches) {
     if (-not $workerText.Contains($needle)) { $needle = "from pathlib import Path`r`n" }
     if (-not $workerText.Contains($needle)) { throw "Worker patch anchor missing: $($patch.Path)" }
     $lineEnd = if ($needle.Contains("`r`n")) { "`r`n" } else { "`n" }
-    $insert = "from pathlib import Path$lineEnd$lineEnd_PLUGIN_ENV = Path(__file__).resolve().with_name('$($patch.Env)')$lineEndif _PLUGIN_ENV.is_dir():$lineEnd    sys.path.insert(0, str(_PLUGIN_ENV))$lineEnd"
+    # Build line-by-line instead of interpolating names next to $lineEnd. PowerShell otherwise
+    # parses tokens such as $lineEnd_PLUGIN_ENV as a different variable and corrupts Python syntax.
+    $insertLines = @(
+        'from pathlib import Path',
+        '',
+        "_PLUGIN_ENV = Path(__file__).resolve().with_name('$($patch.Env)')",
+        'if _PLUGIN_ENV.is_dir():',
+        '    sys.path.insert(0, str(_PLUGIN_ENV))'
+    )
+    $insert = ($insertLines -join $lineEnd) + $lineEnd
     $workerText = $workerText.Replace($needle, $insert)
     Set-Content -Path $patch.Path -Value $workerText -Encoding UTF8 -NoNewline
 }
