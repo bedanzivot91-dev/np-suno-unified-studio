@@ -1,0 +1,23 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:NPVideoStudio.App.ViewModels"
+             x:Class="NPVideoStudio.App.Views.SunoStudioView"
+             x:DataType="vm:SunoStudioViewModel">
+  <Grid RowDefinitions="Auto,*">
+    <Border Classes="surface" Padding="14,10" BorderThickness="0,0,0,1">
+      <Grid ColumnDefinitions="*,Auto">
+        <TextBlock Text="{Binding Status}" VerticalAlignment="Center" />
+        <Button Grid.Column="1" Classes="ghost" Content="Pokušaj ponovo" Command="{Binding RetryCommand}"
+                IsVisible="{Binding !IsReady}" />
+      </Grid>
+    </Border>
+
+    <Grid Grid.Row="1">
+      <NativeWebView Source="{Binding Source}" IsVisible="{Binding IsReady}" />
+      <StackPanel IsVisible="{Binding !IsReady}" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="12">
+        <TextBlock Text="Suno modul se priprema..." FontSize="18" FontWeight="SemiBold" HorizontalAlignment="Center" />
+        <TextBlock Text="{Binding Status}" TextWrapping="Wrap" MaxWidth="720" HorizontalAlignment="Center" />
+      </StackPanel>
+    </Grid>
+  </Grid>
+</UserControl>
