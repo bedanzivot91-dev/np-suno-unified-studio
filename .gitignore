@@ -1,0 +1,9 @@
+_sources/
+_stage/
+_artifacts/
+*.user
+*.suo
+.vs/
+
+__pycache__/
+*.pyc
