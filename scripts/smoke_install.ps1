@@ -58,7 +58,7 @@ $installArgs = @(
     '/MERGETASKS=!desktopicon,!associate,!resetstate'
 )
 $installProcess = Start-Process -FilePath $installer.FullName -ArgumentList $installArgs -PassThru
-Wait-ProcessOrFail -Process $installProcess -TimeoutSeconds 300 -Label 'Unified installer' -LogFile $installerLog
+Wait-ProcessOrFail -Process $installProcess -TimeoutSeconds 600 -Label 'Unified installer' -LogFile $installerLog
 Write-Host '[1/5] Installer completed successfully.' -ForegroundColor Green
 
 Write-Host '[2/5] Verifying the installed payload...' -ForegroundColor Cyan
@@ -68,6 +68,10 @@ $required = @(
     'SunoEngine\app\server.py',
     'SunoEngine\app\server_core.py',
     'SunoEngine\app\web\index.html',
+    'SunoEngine\tools\webview2\MicrosoftEdgeWebView2RuntimeInstallerX64.exe',
+    'SunoEngine\plugins\transcribe_worker.py',
+    'SunoEngine\plugins\stems_worker.py',
+    'SunoEngine\plugins\chromaprint\fpcalc.exe',
     'Tools\ffmpeg\ffmpeg.exe',
     'Tools\ffmpeg\ffprobe.exe',
     'Tools\yt-dlp\yt-dlp.exe',
@@ -140,12 +144,17 @@ try {
     }
 }
 
-Write-Host '[4/5] Starting the INSTALLED GUI and checking Windows responsiveness...' -ForegroundColor Cyan
+Write-Host '[4/5] Starting the INSTALLED GUI, opening real Suno WebView and checking responsiveness...' -ForegroundColor Cyan
 Add-Type @"
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Text;
+
 public static class NpSunoSmokeNative
 {
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
     [DllImport("user32.dll", SetLastError = true)]
     public static extern IntPtr SendMessageTimeout(
         IntPtr hWnd,
@@ -155,10 +164,54 @@ public static class NpSunoSmokeNative
         uint flags,
         uint timeout,
         out IntPtr result);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int maxCount);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowTextLength(IntPtr hWnd);
+
+    public static string[] GetVisibleWindowTitles(int processId)
+    {
+        var titles = new List<string>();
+        EnumWindows((hWnd, _) =>
+        {
+            uint pid;
+            GetWindowThreadProcessId(hWnd, out pid);
+            if (pid != (uint)processId || !IsWindowVisible(hWnd))
+                return true;
+
+            int length = GetWindowTextLength(hWnd);
+            if (length <= 0)
+                return true;
+
+            var text = new StringBuilder(length + 1);
+            GetWindowText(hWnd, text, text.Capacity);
+            if (text.Length > 0)
+                titles.Add(text.ToString());
+            return true;
+        }, IntPtr.Zero);
+        return titles.ToArray();
+    }
 }
 "@
 
 $appExe = Join-Path $installDir 'NPVideoStudio.exe'
+# CI-only path: the installed app uses its real navigation command and real NativeWebDialog.
+$env:NP_SUNO_SMOKE_AUTO_OPEN = '1'
+# The application itself owns port 18765 for its internal Suno child process.
+Remove-Item Env:SUNO_STUDIO_PORT -ErrorAction SilentlyContinue
 $appProcess = Start-Process -FilePath $appExe -WorkingDirectory $installDir -PassThru
 try {
     $windowHandle = [IntPtr]::Zero
@@ -205,11 +258,43 @@ try {
     if ($sendResult -eq [IntPtr]::Zero) {
         throw 'Installed GUI main window is not responding to Windows messages.'
     }
-    Write-Host '[4/5] Installed GUI created a responsive Windows window.' -ForegroundColor Green
+    Write-Host '[4/5] Main unified window is responsive.' -ForegroundColor Green
+
+    $sunoDialogReady = $false
+    $internalHealthReady = $false
+    $lastTitles = @()
+    for ($i = 0; $i -lt 120; $i++) {
+        Start-Sleep -Milliseconds 500
+        $appProcess.Refresh()
+        if ($appProcess.HasExited) {
+            throw "Installed GUI exited while waiting for Suno Studio dialog (code $($appProcess.ExitCode))."
+        }
+
+        $lastTitles = @([NpSunoSmokeNative]::GetVisibleWindowTitles($appProcess.Id))
+        $sunoDialogReady = @($lastTitles | Where-Object { $_ -match 'Suno Pesme Studio' }).Count -gt 0
+        try {
+            $internalHealth = Invoke-RestMethod -Uri 'http://127.0.0.1:18765/api/health' -TimeoutSec 2
+            $internalHealthReady = [bool]$internalHealth.ok
+        } catch {
+            $internalHealthReady = $false
+        }
+
+        if ($sunoDialogReady -and $internalHealthReady) { break }
+    }
+
+    Write-Host "Visible installed-app windows: $($lastTitles -join ' | ')"
+    if (-not $internalHealthReady) {
+        throw 'Unified GUI did not start its own installed Suno backend on port 18765.'
+    }
+    if (-not $sunoDialogReady) {
+        throw 'Unified GUI did not open the real Suno NativeWebDialog during integration smoke test.'
+    }
+    Write-Host '[4/5] Real Suno NativeWebDialog opened and its internal backend is healthy.' -ForegroundColor Green
 } finally {
+    Remove-Item Env:NP_SUNO_SMOKE_AUTO_OPEN -ErrorAction SilentlyContinue
     if (-not $appProcess.HasExited) {
         $null = $appProcess.CloseMainWindow()
-        if (-not $appProcess.WaitForExit(10000)) {
+        if (-not $appProcess.WaitForExit(15000)) {
             Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
         }
     }
@@ -222,6 +307,6 @@ if ($null -eq $uninstaller) {
 }
 $uninstallArgs = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/LOG=$uninstallerLog")
 $uninstallProcess = Start-Process -FilePath $uninstaller.FullName -ArgumentList $uninstallArgs -PassThru
-Wait-ProcessOrFail -Process $uninstallProcess -TimeoutSeconds 120 -Label 'Unified uninstaller' -LogFile $uninstallerLog
+Wait-ProcessOrFail -Process $uninstallProcess -TimeoutSeconds 180 -Label 'Unified uninstaller' -LogFile $uninstallerLog
 Write-Host '[5/5] Uninstaller completed successfully.' -ForegroundColor Green
-Write-Host 'INSTALL + INSTALLED PAYLOAD + INSTALLED SUNO + RESPONSIVE GUI + UNINSTALL smoke test PASSED.' -ForegroundColor Green
+Write-Host 'INSTALL + INSTALLED PAYLOAD + INSTALLED SUNO + RESPONSIVE GUI + REAL SUNO WEBVIEW + UNINSTALL smoke test PASSED.' -ForegroundColor Green
