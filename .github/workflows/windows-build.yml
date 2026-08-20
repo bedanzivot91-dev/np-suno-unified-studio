@@ -66,14 +66,20 @@ jobs:
       - name: Install Windows media/build dependencies
         shell: pwsh
         run: |
+          # Only tools genuinely needed from Chocolatey. yt-dlp and Chromaprint are downloaded
+          # as real upstream binaries by the two original release builders; Chocolatey shims are
+          # deliberately not used in the unified payload.
           choco install ffmpeg -y --no-progress
-          choco install yt-dlp -y --no-progress
-          choco install chromaprint -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'Chocolatey FFmpeg install failed.' }
           choco install tesseract -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'Chocolatey Tesseract install failed.' }
           choco install innosetup -y --no-progress
+          if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 1641 -and $LASTEXITCODE -ne 3010) { throw 'Chocolatey Inno Setup install failed.' }
           "C:\Program Files\Tesseract-OCR" >> $env:GITHUB_PATH
           ffmpeg -version
+          if ($LASTEXITCODE -ne 0) { throw 'FFmpeg did not execute.' }
           ffprobe -version
+          if ($LASTEXITCODE -ne 0) { throw 'FFprobe did not execute.' }
 
       - name: Apply integration only to temporary NP checkout
         shell: pwsh
@@ -95,9 +101,10 @@ jobs:
 
           # The tests must use the exact full FFmpeg/Chromaprint, Deno and yt-dlp staged for the unified release.
           $stage = Join-Path $env:GITHUB_WORKSPACE '_stage\SunoEngine'
-          New-Item -ItemType Directory -Force -Path 'tools\ffmpeg\bin','tools\deno','tools\yt-dlp' | Out-Null
+          New-Item -ItemType Directory -Force -Path 'tools\ffmpeg\bin','tools\deno','tools\yt-dlp','plugins\chromaprint' | Out-Null
           Copy-Item -Force (Join-Path $stage 'tools\ffmpeg\bin\ffmpeg.exe') 'tools\ffmpeg\bin\ffmpeg.exe'
           Copy-Item -Force (Join-Path $stage 'tools\ffmpeg\bin\ffprobe.exe') 'tools\ffmpeg\bin\ffprobe.exe'
+          Copy-Item -Force (Join-Path $stage 'plugins\chromaprint\fpcalc.exe') 'plugins\chromaprint\fpcalc.exe'
           if (Test-Path (Join-Path $stage 'tools\deno\deno.exe')) { Copy-Item -Force (Join-Path $stage 'tools\deno\deno.exe') 'tools\deno\deno.exe' }
           if (Test-Path (Join-Path $stage 'tools\yt-dlp\yt-dlp.exe')) { Copy-Item -Force (Join-Path $stage 'tools\yt-dlp\yt-dlp.exe') 'tools\yt-dlp\yt-dlp.exe' }
 
