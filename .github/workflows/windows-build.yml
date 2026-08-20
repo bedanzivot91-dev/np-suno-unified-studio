@@ -153,7 +153,8 @@ jobs:
             "$portable\SunoEngine\app\server_core.py",
             "$portable\SunoEngine\app\web\index.html",
             "$portable\SunoEngine\plugins\transcribe_worker.py",
-            "$portable\SunoEngine\plugins\stems_worker.py"
+            "$portable\SunoEngine\plugins\stems_worker.py",
+            "$portable\SunoEngine\plugins\chromaprint\fpcalc.exe"
           )
           foreach ($file in $requiredFiles) {
             if (-not (Test-Path $file -PathType Leaf)) { throw "Unified payload missing: $file" }
@@ -173,6 +174,10 @@ jobs:
       - name: Real Windows install + installed runtime + responsive GUI smoke test
         shell: pwsh
         run: pwsh -File scripts/smoke_install.ps1 -DistDir _sources/np/dist
+
+      - name: Second clean install + real functional tools and Suno feature smoke test
+        shell: pwsh
+        run: pwsh -File scripts/full_functional_install_test.ps1 -DistDir _sources/np/dist
 
       - name: Upload unified installer
         uses: actions/upload-artifact@v4
