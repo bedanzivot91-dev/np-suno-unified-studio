@@ -1,0 +1,12 @@
+{
+  "source_repository": "bedanzivot91-dev/force-delete-studio",
+  "suno": {
+    "ref": "v3.3.2.343",
+    "role": "Suno Pesme Studio backend + web UI"
+  },
+  "np_video_studio": {
+    "ref": "52278e919f6ee0af760241a2666626e3ecb16a03",
+    "role": "NP Video Studio Avalonia desktop shell + video editor"
+  },
+  "policy": "Sources are checked out read-only into CI work folders. Integration patches are applied only to those temporary copies. The source repository is never pushed to or modified."
+}
