@@ -52,21 +52,35 @@ if ($matches.Count -ne 1) { throw "Expected exactly one Suno update-thread block
 $serverText = [regex]::Replace($serverText, $pattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $replacement }, 1)
 Set-Content -Path $serverCore -Value $serverText -Encoding UTF8 -NoNewline
 
-# Reuse real Windows media/fingerprint tools and mirror the exact paths Suno expects.
-$ffmpeg = (Get-Command ffmpeg.exe -ErrorAction Stop).Source
-$ffprobe = (Get-Command ffprobe.exe -ErrorAction Stop).Source
-$ffDir = Join-Path $OutputDir 'tools\ffmpeg\bin'
-New-Item -ItemType Directory -Force -Path $ffDir | Out-Null
-Copy-Item -Force $ffmpeg (Join-Path $ffDir 'ffmpeg.exe')
-Copy-Item -Force $ffprobe (Join-Path $ffDir 'ffprobe.exe')
+# Keep the FFmpeg/ffprobe produced by the original Suno --stage-components flow.
+# That flow deliberately stages the BtbN full GPL build and verifies the Chromaprint muxer.
+$stagedFfmpeg = Join-Path $OutputDir 'tools\ffmpeg\bin\ffmpeg.exe'
+$stagedFfprobe = Join-Path $OutputDir 'tools\ffmpeg\bin\ffprobe.exe'
+if (-not (Test-Path $stagedFfmpeg) -or -not (Test-Path $stagedFfprobe)) {
+    throw 'Original Suno component staging did not produce FFmpeg/ffprobe.'
+}
+$muxers = & $stagedFfmpeg -hide_banner -muxers 2>&1 | Out-String
+if ($LASTEXITCODE -ne 0 -or $muxers -notmatch '(?i)chromaprint') {
+    throw 'Staged Suno FFmpeg does not contain the required Chromaprint muxer.'
+}
 
-# plugin_status(ROOT) expects Chromaprint's fpcalc at plugins/chromaprint/fpcalc.exe.
-$fpcalc = (Get-Command fpcalc.exe -ErrorAction Stop).Source
+# plugin_status(ROOT) expects a REAL fpcalc binary at plugins/chromaprint/fpcalc.exe.
+# Never copy Chocolatey's shim: it contains a relative pointer back into Chocolatey's package tree
+# and stops working once moved into the unified application. Download the same official AcoustID
+# portable package already used by NP Video Studio's release builder and extract the real binary.
 $chromaprintDir = Join-Path $OutputDir 'plugins\chromaprint'
 New-Item -ItemType Directory -Force -Path $chromaprintDir | Out-Null
-Copy-Item -Force $fpcalc (Join-Path $chromaprintDir 'fpcalc.exe')
+$fpZip = Join-Path $env:RUNNER_TEMP 'chromaprint-fpcalc-1.5.1-windows-x86_64.zip'
+$fpExtract = Join-Path $env:RUNNER_TEMP 'chromaprint-fpcalc-real'
+if (Test-Path $fpExtract) { Remove-Item $fpExtract -Recurse -Force }
+Invoke-WebRequest -Uri 'https://github.com/acoustid/chromaprint/releases/download/v1.5.1/chromaprint-fpcalc-1.5.1-windows-x86_64.zip' -OutFile $fpZip -UseBasicParsing
+Expand-Archive -Path $fpZip -DestinationPath $fpExtract -Force
+$realFpcalc = Get-ChildItem -Path $fpExtract -Filter 'fpcalc.exe' -Recurse -File | Where-Object { $_.Length -gt 100000 } | Select-Object -First 1
+if ($null -eq $realFpcalc) { throw 'Real fpcalc.exe was not found in the official Chromaprint archive.' }
+Copy-Item -Force $realFpcalc.FullName (Join-Path $chromaprintDir 'fpcalc.exe')
 & (Join-Path $chromaprintDir 'fpcalc.exe') -version
-if ($LASTEXITCODE -ne 0) { throw 'Bundled Suno fpcalc failed its real version test.' }
+if ($LASTEXITCODE -ne 0) { throw 'Bundled real Suno fpcalc failed its version test.' }
+Remove-Item $fpZip, $fpExtract -Recurse -Force -ErrorAction SilentlyContinue
 
 # Install the exact core Python dependency list into Suno's staged embeddable interpreter.
 $py = Join-Path $OutputDir 'python\python.exe'
@@ -147,8 +161,8 @@ try {
     }
     Write-Host "Suno v3 required-tool preflight: $($v3.preflight.readiness)" -ForegroundColor Green
 
-    # Panako is intentionally NOT silently bundled: upstream is AGPL and states native Windows is unsupported.
-    # The original Suno panako_install_test.py verifies the user-supplied JAR integration path in CI.
+    # Panako remains the original optional user-supplied integration. The original
+    # panako_install_test.py is run separately and must pass.
     Invoke-RestMethod -Uri 'http://127.0.0.1:18766/api/shutdown' -Method Post -Body '{}' -ContentType 'application/json' -TimeoutSec 5 | Out-Null
 } finally {
     Start-Sleep -Milliseconds 500
