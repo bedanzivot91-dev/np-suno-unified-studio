@@ -1,0 +1,135 @@
+name: Build NP + Suno Unified Studio
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+# Deliberately read-only. The original force-delete-studio repository is only checked out as source input.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout unified repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Checkout pinned NP Video Studio source (read-only copy)
+        uses: actions/checkout@v4
+        with:
+          repository: bedanzivot91-dev/force-delete-studio
+          ref: 52278e919f6ee0af760241a2666626e3ecb16a03
+          path: _sources/np
+          persist-credentials: false
+
+      - name: Checkout pinned Suno Pesme Studio source (read-only copy)
+        uses: actions/checkout@v4
+        with:
+          repository: bedanzivot91-dev/force-delete-studio
+          ref: v3.3.2.343
+          path: _sources/suno
+          persist-credentials: false
+
+      - name: Verify source pins
+        shell: pwsh
+        run: |
+          $np = (git -C _sources/np rev-parse HEAD).Trim()
+          $suno = (git -C _sources/suno rev-parse HEAD).Trim()
+          if ($np -ne '52278e919f6ee0af760241a2666626e3ecb16a03') { throw "Wrong NP source: $np" }
+          $tagCommit = (git -C _sources/suno rev-list -n 1 v3.3.2.343).Trim()
+          if ($suno -ne $tagCommit) { throw "Wrong Suno tag checkout: HEAD=$suno tag=$tagCommit" }
+          Write-Host "NP source:   $np"
+          Write-Host "Suno source: $suno (v3.3.2.343)"
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Setup Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install Windows media/build dependencies
+        shell: pwsh
+        run: |
+          choco install ffmpeg -y --no-progress
+          choco install yt-dlp -y --no-progress
+          choco install chromaprint -y --no-progress
+          choco install tesseract -y --no-progress
+          choco install innosetup -y --no-progress
+          "C:\Program Files\Tesseract-OCR" >> $env:GITHUB_PATH
+          ffmpeg -version
+          ffprobe -version
+
+      - name: Apply integration only to temporary NP checkout
+        shell: pwsh
+        run: python scripts/apply_integration.py _sources/np
+
+      - name: Stage and health-test pinned Suno engine
+        shell: pwsh
+        run: pwsh -File scripts/stage_suno.ps1 -SunoRoot _sources/suno -OutputDir _stage/SunoEngine
+
+      - name: Restore merged NP shell
+        working-directory: _sources/np
+        run: dotnet restore NPVideoStudio.sln
+
+      - name: Build merged NP shell
+        working-directory: _sources/np
+        run: dotnet build NPVideoStudio.sln -c Release --no-restore
+
+      - name: Run NP regression tests after integration
+        working-directory: _sources/np
+        run: dotnet test tests/NPVideoStudio.UnitTests/NPVideoStudio.UnitTests.csproj -c Release --no-build --logger "trx;LogFileName=unified-test-results.trx"
+
+      - name: Build one unified installer + portable package
+        shell: pwsh
+        working-directory: _sources/np
+        env:
+          NP_SUNO_ENGINE_STAGE: ${{ github.workspace }}\_stage\SunoEngine
+        run: pwsh -File scripts/build-release.ps1
+
+      - name: Validate unified payload really contains both programs
+        shell: pwsh
+        run: |
+          $portable = '_sources\np\dist\NPSunoUnifiedStudio-Portable-x64'
+          $required = @(
+            "$portable\NPVideoStudio.exe",
+            "$portable\SunoEngine\python\pythonw.exe",
+            "$portable\SunoEngine\app\server.py",
+            "$portable\SunoEngine\app\server_core.py",
+            "$portable\SunoEngine\app\web\index.html"
+          )
+          foreach ($file in $required) {
+            if (-not (Test-Path $file -PathType Leaf)) { throw "Unified payload missing: $file" }
+          }
+          $installer = Get-ChildItem '_sources\np\dist\NPSunoUnifiedStudio-Setup-*.exe' | Select-Object -First 1
+          if (-not $installer) { throw 'Unified installer was not produced.' }
+          Write-Host "Unified installer: $($installer.FullName) ($($installer.Length) bytes)"
+
+      - name: Upload unified installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: NPSunoUnifiedStudio-Setup
+          path: _sources/np/dist/NPSunoUnifiedStudio-Setup-*.exe
+          if-no-files-found: error
+
+      - name: Upload unified portable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: NPSunoUnifiedStudio-Portable
+          path: _sources/np/dist/NPSunoUnifiedStudio-Portable-x64/**
+          if-no-files-found: error
