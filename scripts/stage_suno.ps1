@@ -11,7 +11,6 @@ New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
 Write-Host "Staging pinned Suno source from $SunoRoot"
 
-# Use the original Suno setup's own component staging logic, but only in this temporary checkout.
 Push-Location (Join-Path $SunoRoot 'windows_build')
 try {
     & (Join-Path $SunoRoot 'windows_build\normalize_setup_components.ps1')
@@ -20,9 +19,7 @@ try {
     $setupExe = Join-Path $env:RUNNER_TEMP 'unified-suno-stage.exe'
     go build -ldflags="-H windowsgui" -o $setupExe ./setup
     if ($LASTEXITCODE -ne 0) { throw 'Suno setup build failed' }
-} finally {
-    Pop-Location
-}
+} finally { Pop-Location }
 
 $proc = Start-Process -FilePath $setupExe -ArgumentList @('--stage-components', $OutputDir) -Wait -PassThru -NoNewWindow
 if ($proc.ExitCode -ne 0) { throw "Suno --stage-components failed with exit code $($proc.ExitCode)" }
@@ -36,9 +33,7 @@ Get-ChildItem -Recurse -Directory -Filter '__pycache__' (Join-Path $OutputDir 'a
 # Unified copy must not auto-update itself from the standalone Suno release branch.
 $serverCore = Join-Path $OutputDir 'app\server_core.py'
 $serverText = Get-Content $serverCore -Raw -Encoding UTF8
-$pattern = '(?m)^    UPDATE_STOP\.clear\(\)\r?$' + "`n" +
-           '^    UPDATE_THREAD = threading\.Thread\(target=update_check_loop, daemon=True, name="auto-update-check"\)\r?$' + "`n" +
-           '^    UPDATE_THREAD\.start\(\)\r?$'
+$pattern = '(?m)^    UPDATE_STOP\.clear\(\)\r?$' + "`n" + '^    UPDATE_THREAD = threading\.Thread\(target=update_check_loop, daemon=True, name="auto-update-check"\)\r?$' + "`n" + '^    UPDATE_THREAD\.start\(\)\r?$'
 $replacement = @'
     UPDATE_STOP.clear()
     if os.environ.get("SUNO_DISABLE_AUTO_UPDATE", "0") != "1":
@@ -52,22 +47,32 @@ if ($matches.Count -ne 1) { throw "Expected exactly one Suno update-thread block
 $serverText = [regex]::Replace($serverText, $pattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $replacement }, 1)
 Set-Content -Path $serverCore -Value $serverText -Encoding UTF8 -NoNewline
 
-# Keep the FFmpeg/ffprobe produced by the original Suno --stage-components flow.
-# That flow deliberately stages the BtbN full GPL build and verifies the Chromaprint muxer.
-$stagedFfmpeg = Join-Path $OutputDir 'tools\ffmpeg\bin\ffmpeg.exe'
-$stagedFfprobe = Join-Path $OutputDir 'tools\ffmpeg\bin\ffprobe.exe'
-if (-not (Test-Path $stagedFfmpeg) -or -not (Test-Path $stagedFfprobe)) {
-    throw 'Original Suno component staging did not produce FFmpeg/ffprobe.'
-}
-$muxers = & $stagedFfmpeg -hide_banner -muxers 2>&1 | Out-String
-if ($LASTEXITCODE -ne 0 -or $muxers -notmatch '(?i)chromaprint') {
-    throw 'Staged Suno FFmpeg does not contain the required Chromaprint muxer.'
+# Embedded CPython's ._pth isolated mode ignores PYTHONPATH. The original Suno launchers use
+# PYTHONPATH for per-plugin environments, so patch ONLY the staged unified worker copies to put
+# their adjacent env folders on sys.path explicitly. This makes the actual workers functional.
+$workerPatches = @(
+    @{ Path = (Join-Path $OutputDir 'plugins\transcribe_worker.py'); Env = 'transcription_env' },
+    @{ Path = (Join-Path $OutputDir 'plugins\stems_worker.py'); Env = 'stems_env' }
+)
+foreach ($patch in $workerPatches) {
+    $workerText = Get-Content $patch.Path -Raw -Encoding UTF8
+    $needle = "from pathlib import Path`n"
+    if (-not $workerText.Contains($needle)) { $needle = "from pathlib import Path`r`n" }
+    if (-not $workerText.Contains($needle)) { throw "Worker patch anchor missing: $($patch.Path)" }
+    $lineEnd = if ($needle.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $insert = "from pathlib import Path$lineEnd$lineEnd_PLUGIN_ENV = Path(__file__).resolve().with_name('$($patch.Env)')$lineEndif _PLUGIN_ENV.is_dir():$lineEnd    sys.path.insert(0, str(_PLUGIN_ENV))$lineEnd"
+    $workerText = $workerText.Replace($needle, $insert)
+    Set-Content -Path $patch.Path -Value $workerText -Encoding UTF8 -NoNewline
 }
 
-# plugin_status(ROOT) expects a REAL fpcalc binary at plugins/chromaprint/fpcalc.exe.
-# Never copy Chocolatey's shim: it contains a relative pointer back into Chocolatey's package tree
-# and stops working once moved into the unified application. Download the same official AcoustID
-# portable package already used by NP Video Studio's release builder and extract the real binary.
+# Keep the full FFmpeg staged and verified by original Suno setup.
+$stagedFfmpeg = Join-Path $OutputDir 'tools\ffmpeg\bin\ffmpeg.exe'
+$stagedFfprobe = Join-Path $OutputDir 'tools\ffmpeg\bin\ffprobe.exe'
+if (-not (Test-Path $stagedFfmpeg) -or -not (Test-Path $stagedFfprobe)) { throw 'Original Suno staging did not produce FFmpeg/ffprobe.' }
+$muxers = & $stagedFfmpeg -hide_banner -muxers 2>&1 | Out-String
+if ($LASTEXITCODE -ne 0 -or $muxers -notmatch '(?i)chromaprint') { throw 'Staged Suno FFmpeg lacks Chromaprint muxer.' }
+
+# Real Chromaprint binary, never Chocolatey shim.
 $chromaprintDir = Join-Path $OutputDir 'plugins\chromaprint'
 New-Item -ItemType Directory -Force -Path $chromaprintDir | Out-Null
 $fpZip = Join-Path $env:RUNNER_TEMP 'chromaprint-fpcalc-1.5.1-windows-x86_64.zip'
@@ -76,13 +81,13 @@ if (Test-Path $fpExtract) { Remove-Item $fpExtract -Recurse -Force }
 Invoke-WebRequest -Uri 'https://github.com/acoustid/chromaprint/releases/download/v1.5.1/chromaprint-fpcalc-1.5.1-windows-x86_64.zip' -OutFile $fpZip -UseBasicParsing
 Expand-Archive -Path $fpZip -DestinationPath $fpExtract -Force
 $realFpcalc = Get-ChildItem -Path $fpExtract -Filter 'fpcalc.exe' -Recurse -File | Where-Object { $_.Length -gt 100000 } | Select-Object -First 1
-if ($null -eq $realFpcalc) { throw 'Real fpcalc.exe was not found in the official Chromaprint archive.' }
+if ($null -eq $realFpcalc) { throw 'Real fpcalc.exe not found in official Chromaprint archive.' }
 Copy-Item -Force $realFpcalc.FullName (Join-Path $chromaprintDir 'fpcalc.exe')
 & (Join-Path $chromaprintDir 'fpcalc.exe') -version
-if ($LASTEXITCODE -ne 0) { throw 'Bundled real Suno fpcalc failed its version test.' }
+if ($LASTEXITCODE -ne 0) { throw 'Bundled real Suno fpcalc failed version test.' }
 Remove-Item $fpZip, $fpExtract -Recurse -Force -ErrorAction SilentlyContinue
 
-# Install the exact core Python dependency list into Suno's staged embeddable interpreter.
+# Core Python packages.
 $py = Join-Path $OutputDir 'python\python.exe'
 $pyw = Join-Path $OutputDir 'python\pythonw.exe'
 if (-not (Test-Path $py) -or -not (Test-Path $pyw)) { throw 'Embeddable Python was not staged.' }
@@ -96,30 +101,47 @@ Remove-Item $getPip -Force
 & $py -m pip install --no-warn-script-location -r (Join-Path $SunoRoot 'requirements-core.txt')
 if ($LASTEXITCODE -ne 0) { throw 'pip install into embedded Suno Python failed' }
 
-# Original Suno advanced_features.py loads these from plugins/<component>_env via PYTHONPATH.
-# Preinstall them there so transcription and stem separation are ready immediately after install.
+# Exact optional AI dependency sets in the locations expected by original plugin_status().
 $transcriptionEnv = Join-Path $OutputDir 'plugins\transcription_env'
 $stemsEnv = Join-Path $OutputDir 'plugins\stems_env'
 New-Item -ItemType Directory -Force -Path $transcriptionEnv, $stemsEnv | Out-Null
-
-Write-Host 'Installing Suno transcription AI (faster-whisper + ctranslate2) into plugins\transcription_env ...' -ForegroundColor Cyan
 & $py -m pip install --no-warn-script-location --disable-pip-version-check --target $transcriptionEnv 'faster-whisper==1.2.1' 'ctranslate2==4.8.1'
 if ($LASTEXITCODE -ne 0) { throw 'Suno transcription AI dependencies failed to install.' }
-
-Write-Host 'Installing Suno stem-separation AI into plugins\stems_env ...' -ForegroundColor Cyan
 & $py -m pip install --no-warn-script-location --disable-pip-version-check --target $stemsEnv 'audio-separator[cpu]==0.44.5'
 if ($LASTEXITCODE -ne 0) { throw 'Suno stem-separation AI dependencies failed to install.' }
 
-# Verify the packages from the same isolated plugin layout used by the running Suno code.
-$env:PYTHONPATH = $transcriptionEnv
-& $py -c "import faster_whisper, ctranslate2; print('TRANSCRIPTION_AI_OK', faster_whisper.__version__, ctranslate2.__version__)"
+# Explicit sys.path mirrors the worker patch and works under CPython ._pth isolation.
+& $py -c "import sys; sys.path.insert(0, sys.argv[1]); import faster_whisper, ctranslate2; print('TRANSCRIPTION_AI_OK')" $transcriptionEnv
 if ($LASTEXITCODE -ne 0) { throw 'Bundled Suno transcription AI import test failed.' }
-$env:PYTHONPATH = $stemsEnv
-& $py -c "import audio_separator; from audio_separator.separator import Separator; print('STEMS_AI_OK')"
+& $py -c "import sys; sys.path.insert(0, sys.argv[1]); import audio_separator; from audio_separator.separator import Separator; print('STEMS_AI_OK')" $stemsEnv
 if ($LASTEXITCODE -ne 0) { throw 'Bundled Suno stem-separation AI import test failed.' }
-Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
 
-# Real health and advanced-feature checks using the SAME pythonw + server.py path the unified app uses.
+# Prove the actual staged worker files see their own env without PYTHONPATH.
+$workerProbe = @'
+import runpy, sys
+from pathlib import Path
+for name, env, mods in [
+    ('transcribe_worker.py','transcription_env',('faster_whisper','ctranslate2')),
+    ('stems_worker.py','stems_env',('audio_separator',)),
+]:
+    worker = Path(sys.argv[1]) / 'plugins' / name
+    text = worker.read_text(encoding='utf-8-sig')
+    ns = {'__file__': str(worker), '__name__': 'unified_worker_probe'}
+    exec(compile(text, str(worker), 'exec'), ns, ns)
+    for mod in mods:
+        __import__(mod)
+    for mod in mods:
+        sys.modules.pop(mod, None)
+    sys.path[:] = [p for p in sys.path if env not in p]
+print('WORKER_ENV_IMPORTS_OK')
+'@
+$probeFile = Join-Path $env:RUNNER_TEMP 'probe_unified_workers.py'
+Set-Content $probeFile $workerProbe -Encoding UTF8
+& $py $probeFile $OutputDir
+if ($LASTEXITCODE -ne 0) { throw 'Actual staged Suno worker environment probe failed.' }
+Remove-Item $probeFile -Force
+
+# Real server health and feature status.
 $healthRoot = Join-Path $env:RUNNER_TEMP 'np-suno-unified-health'
 if (Test-Path $healthRoot) { Remove-Item $healthRoot -Recurse -Force }
 $env:SUNO_STUDIO_USER_DIR = $healthRoot
@@ -139,34 +161,19 @@ $ok = $false
 try {
     for ($i = 0; $i -lt 60; $i++) {
         Start-Sleep -Milliseconds 500
-        try {
-            $r = Invoke-RestMethod -Uri 'http://127.0.0.1:18766/api/health' -TimeoutSec 2
-            if ($r.ok) { $ok = $true; break }
-        } catch {}
+        try { $r = Invoke-RestMethod -Uri 'http://127.0.0.1:18766/api/health' -TimeoutSec 2; if ($r.ok) { $ok = $true; break } } catch {}
     }
     if (-not $ok) { throw 'Staged Suno server did not become healthy.' }
-
     $advanced = Invoke-RestMethod -Uri 'http://127.0.0.1:18766/api/advanced/status' -TimeoutSec 10
     foreach ($component in @('stems','transcription','chromaprint')) {
         $state = $advanced.plugins.$component
-        if ($null -eq $state -or -not $state.installed) {
-            throw "Staged Suno advanced component is not installed: $component"
-        }
+        if ($null -eq $state -or -not $state.installed) { throw "Staged Suno advanced component not installed: $component" }
     }
-    Write-Host 'Suno advanced status confirms stems + transcription + Chromaprint are installed.' -ForegroundColor Green
-
     $v3 = Invoke-RestMethod -Uri 'http://127.0.0.1:18766/api/v3/status' -TimeoutSec 15
-    if (-not $v3.preflight.ok) {
-        throw "Suno v3 required-tool preflight is blocked: $($v3.preflight | ConvertTo-Json -Depth 8 -Compress)"
-    }
-    Write-Host "Suno v3 required-tool preflight: $($v3.preflight.readiness)" -ForegroundColor Green
-
-    # Panako remains the original optional user-supplied integration. The original
-    # panako_install_test.py is run separately and must pass.
+    if (-not $v3.preflight.ok) { throw "Suno v3 preflight blocked: $($v3.preflight | ConvertTo-Json -Depth 8 -Compress)" }
     Invoke-RestMethod -Uri 'http://127.0.0.1:18766/api/shutdown' -Method Post -Body '{}' -ContentType 'application/json' -TimeoutSec 5 | Out-Null
 } finally {
     Start-Sleep -Milliseconds 500
     if (-not $p.HasExited) { $p.Kill() }
 }
-
-Write-Host "SunoEngine staged, core + advanced runtime-tested, and AI/fingerprint components verified successfully: $OutputDir"
+Write-Host "SunoEngine staged and runtime-tested successfully: $OutputDir"
