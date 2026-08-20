@@ -6,6 +6,12 @@ on:
     branches: [main]
   pull_request:
 
+# Only the newest validation for the same PR/branch matters. This also kills old smoke tests
+# that can otherwise remain hung and block the Windows runner indefinitely.
+concurrency:
+  group: np-suno-unified-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 # Deliberately read-only. The original force-delete-studio repository is only checked out as source input.
 permissions:
   contents: read
@@ -99,7 +105,6 @@ jobs:
           python -m pip install -r requirements-core.txt
           if ($LASTEXITCODE -ne 0) { throw 'Installing Suno test dependencies failed.' }
 
-          # The tests must use the exact full FFmpeg/Chromaprint, Deno and yt-dlp staged for the unified release.
           $stage = Join-Path $env:GITHUB_WORKSPACE '_stage\SunoEngine'
           New-Item -ItemType Directory -Force -Path 'tools\ffmpeg\bin','tools\deno','tools\yt-dlp','plugins\chromaprint' | Out-Null
           Copy-Item -Force (Join-Path $stage 'tools\ffmpeg\bin\ffmpeg.exe') 'tools\ffmpeg\bin\ffmpeg.exe'
