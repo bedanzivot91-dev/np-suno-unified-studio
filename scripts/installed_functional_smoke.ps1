@@ -70,7 +70,7 @@ $transcriptionEnv = Join-Path $engine 'plugins\transcription_env'
 $stemsEnv = Join-Path $engine 'plugins\stems_env'
 & $python -c "import sys; sys.path.insert(0, sys.argv[1]); import faster_whisper, ctranslate2; print('installed transcription AI OK')" $transcriptionEnv
 if ($LASTEXITCODE -ne 0) { throw 'Installed Suno transcription AI import failed.' }
-& $python -c "import sys; sys.path.insert(0, sys.argv[1]); import audio_separator; from audio_separator.separator import Separator; print('installed stems AI OK')" $stemsEnv
+& $python -c "import sys; sys.path.insert(0, sys.argv[1]); import audioread, audio_separator; from audio_separator.separator import Separator; print('installed stems AI OK')" $stemsEnv
 if ($LASTEXITCODE -ne 0) { throw 'Installed Suno stems AI import failed.' }
 
 # Execute both installed worker modules under embedded Python isolation. Their staged unified patches
@@ -79,7 +79,7 @@ $probe = @'
 import sys
 from pathlib import Path
 root=Path(sys.argv[1])
-for name, env, mods in [('transcribe_worker.py','transcription_env',('faster_whisper','ctranslate2')),('stems_worker.py','stems_env',('audio_separator',))]:
+for name, env, mods in [('transcribe_worker.py','transcription_env',('faster_whisper','ctranslate2')),('stems_worker.py','stems_env',('audioread','audio_separator'))]:
     worker=root/'plugins'/name
     ns={'__file__':str(worker),'__name__':'installed_worker_probe'}
     exec(compile(worker.read_text(encoding='utf-8-sig'),str(worker),'exec'),ns,ns)
