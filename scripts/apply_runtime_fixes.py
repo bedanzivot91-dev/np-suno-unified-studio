@@ -44,11 +44,21 @@ start = build_text.find(block_start_marker)
 end = build_text.find(block_end_marker, start)
 if start < 0 or end < 0:
     raise RuntimeError("scripts/build-release.ps1: generated unified Suno packaging block was not found")
+
 block = build_text[start:end]
 if "\\n" in block:
     block = block.replace("\\n", "\n")
     build_text = build_text[:start] + block + build_text[end:]
     build_release.write_text(build_text, encoding="utf-8")
 
-# Fail early if the generated block is still malformed instead of discovering it during packaging.
-verified = build_release.read_text(encoding="utf-8")n
+# Fail here, before compilation/packaging, if the generated block is still malformed.
+verified_text = build_release.read_text(encoding="utf-8")
+verified_start = verified_text.find(block_start_marker)
+verified_end = verified_text.find(block_end_marker, verified_start)
+verified_block = verified_text[verified_start:verified_end]
+if "\\n" in verified_block:
+    raise RuntimeError("scripts/build-release.ps1: literal \\n sequences remain in unified packaging block")
+if "$unifiedSunoEngine = $env:NP_SUNO_ENGINE_STAGE" not in verified_block:
+    raise RuntimeError("scripts/build-release.ps1: unified Suno staging command is missing")
+
+print("Unified runtime isolation and packaging fixes applied:", root)
